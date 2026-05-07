@@ -32,6 +32,8 @@ const FONT_AXES = [
   { tag: 'YPOS', min: -400, max: 400, default: 0, step: 1 },
 ];
 
+const ASPECT_MODES = ['lockedX', 'uniform', 'stretch'];
+
 const state = {
   mode: 'nikeBars',
   seed: 1,
@@ -43,7 +45,7 @@ const state = {
   manualTime: 0.5,
   showBorders: true,
   fitRatio: 1.0,
-  uniformScale: false,
+  aspectMode: 'lockedX',
 };
 for (const axis of FONT_AXES) state[axis.tag] = axis.default;
 
@@ -118,15 +120,22 @@ function fitCell(c, w, h) {
   c.svg.setAttribute('viewBox', `0 0 ${Math.max(w, 0.0001)} ${Math.max(h, 0.0001)}`);
   const bbox = measureChar(c.char);
   if (!bbox) return;
-  let scaleX = (w / bbox.width) * state.fitRatio;
-  let scaleY = (h / bbox.height) * state.fitRatio;
-  if (!isFinite(scaleX)) scaleX = 0;
-  if (!isFinite(scaleY)) scaleY = 0;
-  if (state.uniformScale) {
-    const s = Math.min(scaleX, scaleY);
+  let scaleX, scaleY;
+  if (state.aspectMode === 'uniform') {
+    const s = Math.min(w / bbox.width, h / bbox.height) * state.fitRatio;
     scaleX = s;
     scaleY = s;
+  } else if (state.aspectMode === 'lockedX') {
+    const refH = state.mode === 'nikeBars' ? stage.clientHeight : Math.max(w, h);
+    const ref = Math.min(w / bbox.width, refH / bbox.height) * state.fitRatio;
+    scaleX = ref;
+    scaleY = refH > 0 ? ref * (h / refH) : 0;
+  } else {
+    scaleX = (w / bbox.width) * state.fitRatio;
+    scaleY = (h / bbox.height) * state.fitRatio;
   }
+  if (!isFinite(scaleX)) scaleX = 0;
+  if (!isFinite(scaleY)) scaleY = 0;
   const cx = w / 2;
   const cy = h / 2;
   const bx = bbox.x + bbox.width / 2;
@@ -252,7 +261,7 @@ function buildGUI() {
   common.add(state, 'mode', MODES).onChange(rebuild);
   common.add(state, 'showBorders').name('borders').onChange(applyBorders);
   common.add(state, 'fitRatio', 0.5, 1.1, 0.01).name('fit ratio').onChange(refitAll);
-  common.add(state, 'uniformScale').name('uniform scale').onChange(refitAll);
+  common.add(state, 'aspectMode', ASPECT_MODES).name('aspect').onChange(refitAll);
 
   const nike = gui.addFolder('NIKE bars');
   const textCtrl = nike.add(state, 'text').name('text');
