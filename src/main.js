@@ -22,14 +22,9 @@ const EASINGS = {
 };
 
 const FONT_AXES = [
-  { tag: 'WGT1', min: 100, max: 800, default: 600, step: 1 },
-  { tag: 'WGT2', min: 100, max: 800, default: 600, step: 1 },
-  { tag: 'WGT3', min: 100, max: 800, default: 600, step: 1 },
-  { tag: 'WGT4', min: 100, max: 800, default: 600, step: 1 },
-  { tag: 'SIZE', min: 0, max: 100, default: 50, step: 1 },
-  { tag: 'PROP', min: 0, max: 100, default: 50, step: 1 },
-  { tag: 'EXTD', min: 0, max: 100, default: 50, step: 1 },
-  { tag: 'YPOS', min: -400, max: 400, default: 0, step: 1 },
+  { tag: 'wght', min: 0, max: 1000, default: 700, step: 1 },
+  { tag: 'wdth', min: 100, max: 7500, default: 600, step: 1 },
+  { tag: 'SIZE', min: 1000, max: 4000, default: 1000, step: 1 },
 ];
 
 const ASPECT_MODES = ['lockedX', 'uniform', 'stretch'];
