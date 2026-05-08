@@ -5,6 +5,10 @@ import { bspSplit } from './splitters/bsp.js';
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const MODES = ['nikeBars', 'bsp'];
+const REF_FS = 100;
+const LUT_SAMPLES = 32;
+const WDTH_MIN = 100;
+const WDTH_MAX = 7500;
 
 const EASINGS = {
   linear: (t) => t,
@@ -23,11 +27,8 @@ const EASINGS = {
 
 const FONT_AXES = [
   { tag: 'wght', min: 0, max: 1000, default: 700, step: 1 },
-  { tag: 'wdth', min: 100, max: 7500, default: 600, step: 1 },
   { tag: 'SIZE', min: 1000, max: 4000, default: 1000, step: 1 },
 ];
-
-const ASPECT_MODES = ['lockedX', 'uniform', 'stretch'];
 
 const state = {
   mode: 'nikeBars',
@@ -40,13 +41,12 @@ const state = {
   manualTime: 0.5,
   showBorders: true,
   fitRatio: 1.0,
-  aspectMode: 'lockedX',
 };
 for (const axis of FONT_AXES) state[axis.tag] = axis.default;
 
 const stage = document.getElementById('stage');
 
-const bboxCache = new Map();
+const charLUTs = new Map();
 let measureSvg, measureText;
 
 function setupMeasure() {
@@ -61,29 +61,79 @@ function setupMeasure() {
     pointerEvents: 'none',
   });
   measureText = document.createElementNS(SVG_NS, 'text');
-  measureText.setAttribute('font-size', '100');
+  measureText.setAttribute('font-size', String(REF_FS));
   measureText.setAttribute('dominant-baseline', 'alphabetic');
   measureSvg.appendChild(measureText);
   stage.appendChild(measureSvg);
 }
 
-function measureChar(ch) {
-  if (bboxCache.has(ch)) return bboxCache.get(ch);
-  measureText.textContent = ch;
-  let bbox;
-  try {
-    bbox = measureText.getBBox();
-  } catch {
-    return null;
-  }
-  if (!bbox || bbox.width === 0 || bbox.height === 0) return null;
-  const result = { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
-  bboxCache.set(ch, result);
-  return result;
+function setMeasureAxes(wdth) {
+  measureText.style.fontVariationSettings = `"wght" ${state.wght}, "wdth" ${wdth}, "SIZE" ${state.SIZE}`;
 }
 
-function invalidateMeasurements() {
-  bboxCache.clear();
+function buildLUT(char) {
+  const lut = [];
+  for (let i = 0; i < LUT_SAMPLES; i++) {
+    const t = i / (LUT_SAMPLES - 1);
+    const wdth = WDTH_MIN + (WDTH_MAX - WDTH_MIN) * t;
+    setMeasureAxes(wdth);
+    measureText.textContent = char;
+    let bbox;
+    try {
+      bbox = measureText.getBBox();
+    } catch {
+      return null;
+    }
+    if (!bbox || bbox.width === 0 || bbox.height === 0) return null;
+    lut.push({
+      wdth,
+      bboxW: bbox.width,
+      bboxH: bbox.height,
+      bboxX: bbox.x,
+      bboxY: bbox.y,
+    });
+  }
+  return lut;
+}
+
+function getLUT(char) {
+  if (charLUTs.has(char)) return charLUTs.get(char);
+  const lut = buildLUT(char);
+  if (!lut) return null;
+  charLUTs.set(char, lut);
+  return lut;
+}
+
+function invalidateLUTs() {
+  charLUTs.clear();
+}
+
+function lerpEntry(a, b, u) {
+  return {
+    wdth: a.wdth + u * (b.wdth - a.wdth),
+    bboxW: a.bboxW + u * (b.bboxW - a.bboxW),
+    bboxH: a.bboxH + u * (b.bboxH - a.bboxH),
+    bboxX: a.bboxX + u * (b.bboxX - a.bboxX),
+    bboxY: a.bboxY + u * (b.bboxY - a.bboxY),
+  };
+}
+
+function findSampleForRatio(lut, targetRatio) {
+  const first = lut[0];
+  const last = lut[lut.length - 1];
+  const minR = first.bboxW / first.bboxH;
+  const maxR = last.bboxW / last.bboxH;
+  if (!isFinite(targetRatio) || targetRatio >= maxR) return last;
+  if (targetRatio <= minR) return first;
+  for (let i = 0; i < lut.length - 1; i++) {
+    const r0 = lut[i].bboxW / lut[i].bboxH;
+    const r1 = lut[i + 1].bboxW / lut[i + 1].bboxH;
+    if (r0 <= targetRatio && targetRatio <= r1) {
+      const u = r1 === r0 ? 0 : (targetRatio - r0) / (r1 - r0);
+      return lerpEntry(lut[i], lut[i + 1], u);
+    }
+  }
+  return last;
 }
 
 let cells = [];
@@ -92,9 +142,8 @@ function makeCell(ch) {
   const el = document.createElement('div');
   el.className = 'cell' + (state.showBorders ? ' bordered' : '');
   const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('preserveAspectRatio', 'none');
   const text = document.createElementNS(SVG_NS, 'text');
-  text.setAttribute('font-size', '100');
+  text.setAttribute('text-anchor', 'middle');
   text.setAttribute('dominant-baseline', 'alphabetic');
   text.textContent = ch;
   svg.appendChild(text);
@@ -107,43 +156,40 @@ function clearCells() {
   cells = [];
 }
 
+function positionCell(c, x, y) {
+  c.el.style.left = x + 'px';
+  c.el.style.top = y + 'px';
+}
+
 function fitCell(c, w, h) {
   c.el.style.width = w + 'px';
   c.el.style.height = h + 'px';
   c.svg.setAttribute('width', w);
   c.svg.setAttribute('height', h);
-  c.svg.setAttribute('viewBox', `0 0 ${Math.max(w, 0.0001)} ${Math.max(h, 0.0001)}`);
-  const bbox = measureChar(c.char);
-  if (!bbox) return;
-  let scaleX, scaleY;
-  if (state.aspectMode === 'uniform') {
-    const s = Math.min(w / bbox.width, h / bbox.height) * state.fitRatio;
-    scaleX = s;
-    scaleY = s;
-  } else if (state.aspectMode === 'lockedX') {
-    const refH = state.mode === 'nikeBars' ? stage.clientHeight : Math.max(w, h);
-    const ref = Math.min(w / bbox.width, refH / bbox.height) * state.fitRatio;
-    scaleX = ref;
-    scaleY = refH > 0 ? ref * (h / refH) : 0;
-  } else {
-    scaleX = (w / bbox.width) * state.fitRatio;
-    scaleY = (h / bbox.height) * state.fitRatio;
-  }
-  if (!isFinite(scaleX)) scaleX = 0;
-  if (!isFinite(scaleY)) scaleY = 0;
-  const cx = w / 2;
-  const cy = h / 2;
-  const bx = bbox.x + bbox.width / 2;
-  const by = bbox.y + bbox.height / 2;
-  c.text.setAttribute(
-    'transform',
-    `translate(${cx} ${cy}) scale(${scaleX} ${scaleY}) translate(${-bx} ${-by})`
-  );
-}
 
-function positionCell(c, x, y) {
-  c.el.style.left = x + 'px';
-  c.el.style.top = y + 'px';
+  if (w <= 0 || h <= 0) {
+    c.text.setAttribute('font-size', '0');
+    return;
+  }
+
+  const lut = getLUT(c.char);
+  if (!lut) return;
+
+  const targetRatio = w / h;
+  const sample = findSampleForRatio(lut, targetRatio);
+
+  const fsByH = (REF_FS * h) / sample.bboxH;
+  const fsByW = (REF_FS * w) / sample.bboxW;
+  const fontSize = Math.min(fsByH, fsByW) * state.fitRatio;
+  const scale = fontSize / REF_FS;
+
+  const cx = w / 2;
+  const cy = h / 2 - (sample.bboxY + sample.bboxH / 2) * scale;
+
+  c.text.setAttribute('font-size', fontSize);
+  c.text.setAttribute('x', cx);
+  c.text.setAttribute('y', cy);
+  c.text.style.fontVariationSettings = `"wght" ${state.wght}, "wdth" ${sample.wdth}, "SIZE" ${state.SIZE}`;
 }
 
 function buildBSP() {
@@ -229,10 +275,8 @@ function easedDivider(t, period, easingName) {
 }
 
 function applyFontVariation() {
-  const parts = FONT_AXES.map((a) => `"${a.tag}" ${state[a.tag]}`);
-  stage.style.fontVariationSettings = parts.join(', ');
-  invalidateMeasurements();
-  if (state.mode === 'bsp') refitBSP();
+  invalidateLUTs();
+  refitAll();
 }
 
 function rebuild() {
@@ -255,8 +299,7 @@ function buildGUI() {
   const common = gui.addFolder('Mode');
   common.add(state, 'mode', MODES).onChange(rebuild);
   common.add(state, 'showBorders').name('borders').onChange(applyBorders);
-  common.add(state, 'fitRatio', 0.5, 1.1, 0.01).name('fit ratio').onChange(refitAll);
-  common.add(state, 'aspectMode', ASPECT_MODES).name('aspect').onChange(refitAll);
+  common.add(state, 'fitRatio', 0.5, 1.0, 0.01).name('fit ratio').onChange(refitAll);
 
   const nike = gui.addFolder('NIKE bars');
   const textCtrl = nike.add(state, 'text').name('text');
@@ -316,7 +359,6 @@ function buildGUI() {
 
 setupMeasure();
 buildGUI();
-applyFontVariation();
 rebuild();
 requestAnimationFrame(tick);
 
@@ -327,7 +369,7 @@ window.addEventListener('resize', () => {
 
 if (document.fonts && document.fonts.ready) {
   document.fonts.ready.then(() => {
-    invalidateMeasurements();
+    invalidateLUTs();
     refitAll();
   });
 }
