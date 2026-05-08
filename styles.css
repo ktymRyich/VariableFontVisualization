@@ -1,6 +1,6 @@
 @font-face {
-  font-family: 'SerendieProVF';
-  src: url('./SerendieProVF.ttf') format('truetype-variations');
+  font-family: 'TDCVariable';
+  src: url('./TDC_Variable_Font_Aug_15_Smooth.ttf') format('truetype-variations');
   font-display: block;
 }
 
@@ -18,7 +18,7 @@ html, body {
 }
 
 body {
-  font-family: 'SerendieProVF', system-ui, sans-serif;
+  font-family: 'TDCVariable', system-ui, sans-serif;
   color: #000000;
 }
 
