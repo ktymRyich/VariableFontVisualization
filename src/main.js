@@ -161,13 +161,15 @@ function positionCell(c, x, y) {
   c.el.style.top = y + 'px';
 }
 
-function fitCell(c, w, h) {
-  c.el.style.width = w + 'px';
-  c.el.style.height = h + 'px';
-  c.svg.setAttribute('width', w);
-  c.svg.setAttribute('height', h);
+function fitCell(c, natW, natH, actW = natW, actH = natH) {
+  c.el.style.width = actW + 'px';
+  c.el.style.height = actH + 'px';
+  c.svg.setAttribute('width', actW);
+  c.svg.setAttribute('height', actH);
+  c.svg.setAttribute('viewBox', `0 0 ${Math.max(natW, 1)} ${Math.max(natH, 1)}`);
+  c.svg.setAttribute('preserveAspectRatio', 'none');
 
-  if (w <= 0 || h <= 0) {
+  if (natW <= 0 || natH <= 0) {
     c.text.setAttribute('font-size', '0');
     return;
   }
@@ -175,16 +177,16 @@ function fitCell(c, w, h) {
   const lut = getLUT(c.char);
   if (!lut) return;
 
-  const targetRatio = w / h;
+  const targetRatio = natW / natH;
   const sample = findSampleForRatio(lut, targetRatio);
 
-  const fsByH = (REF_FS * h) / sample.bboxH;
-  const fsByW = (REF_FS * w) / sample.bboxW;
+  const fsByH = (REF_FS * natH) / sample.bboxH;
+  const fsByW = (REF_FS * natW) / sample.bboxW;
   const fontSize = Math.min(fsByH, fsByW) * state.fitRatio;
   const scale = fontSize / REF_FS;
 
-  const cx = w / 2;
-  const cy = h / 2 - (sample.bboxY + sample.bboxH / 2) * scale;
+  const cx = natW / 2;
+  const cy = natH / 2 - (sample.bboxY + sample.bboxH / 2) * scale;
 
   c.text.setAttribute('font-size', fontSize);
   c.text.setAttribute('x', cx);
@@ -243,7 +245,7 @@ function updateNikeLayout() {
     const y = c.row === 0 ? 0 : topH;
     const rh = c.row === 0 ? topH : botH;
     positionCell(c, x, y);
-    fitCell(c, colW, rh);
+    fitCell(c, colW, h, colW, rh);
   }
 }
 
