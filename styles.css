@@ -49,3 +49,26 @@ body {
 .cell text {
   fill: currentColor;
 }
+
+#camera-preview {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  width: 240px;
+  height: 180px;
+  background: #000;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  z-index: 100;
+  overflow: hidden;
+}
+
+#camera-preview canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#camera-preview[hidden] {
+  display: none !important;
+}
