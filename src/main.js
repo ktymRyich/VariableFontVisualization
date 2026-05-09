@@ -30,6 +30,15 @@ const FONT_AXES = [
   { tag: 'SIZE', min: 1000, max: 4000, default: 1000, step: 1 },
 ];
 
+const PHASE_PATTERNS = [
+  'leftToRight',
+  'rightToLeft',
+  'centerOut',
+  'edgesIn',
+  'alternate',
+  'random',
+];
+
 const state = {
   mode: 'nikeBars',
   seed: 1,
@@ -37,7 +46,11 @@ const state = {
   text: 'NIKE',
   playing: true,
   period: 4.0,
-  easing: 'sineInOut',
+  easing: 'expoInOut',
+  hold: 0.5,
+  phasePattern: 'leftToRight',
+  phaseUnit: 0.05,
+  phaseSeed: 1,
   manualTime: 0.5,
   showBorders: true,
   fitRatio: 1.0,
@@ -237,11 +250,19 @@ function updateNikeLayout() {
   const h = stage.clientHeight;
   const cols = state.text.length || 1;
   const colW = w / cols;
-  const div = computeDividerY();
-  const topH = Math.round(h * div);
-  const botH = h - topH;
+  const baseT = state.playing ? virtualTime : state.manualTime * state.period;
+
+  const colTopH = new Array(cols);
+  for (let i = 0; i < cols; i++) {
+    const t = baseT - getColPhaseOffset(i, cols);
+    const div = easedDivider(t, state.period, state.easing, state.hold);
+    colTopH[i] = Math.round(h * div);
+  }
+
   for (const c of cells) {
     const x = c.col * colW;
+    const topH = colTopH[c.col];
+    const botH = h - topH;
     const y = c.row === 0 ? 0 : topH;
     const rh = c.row === 0 ? topH : botH;
     positionCell(c, x, y);
@@ -262,18 +283,49 @@ function tick(now) {
   }
 }
 
-function computeDividerY() {
-  if (state.playing) {
-    return easedDivider(virtualTime, state.period, state.easing);
+function getColPhaseOffset(col, totalCols) {
+  if (state.phaseUnit <= 0 || totalCols <= 1) return 0;
+  const u = state.phaseUnit * state.period;
+  const c = (totalCols - 1) / 2;
+  switch (state.phasePattern) {
+    case 'leftToRight':
+      return col * u;
+    case 'rightToLeft':
+      return (totalCols - 1 - col) * u;
+    case 'centerOut':
+      return Math.abs(col - c) * u;
+    case 'edgesIn':
+      return (c - Math.abs(col - c)) * u;
+    case 'alternate':
+      return (col % 2) * u;
+    case 'random': {
+      const rng = mulberry32(((state.phaseSeed * 31 + col * 0x9e3779b9) >>> 0) || 1);
+      return rng() * (totalCols - 1) * u;
+    }
+    default:
+      return 0;
   }
-  return state.manualTime;
 }
 
-function easedDivider(t, period, easingName) {
+function easedDivider(t, period, easingName, holdSec) {
+  if (period <= 0) return 0;
   const phase = (((t / period) % 1) + 1) % 1;
-  const tri = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+  const holdFrac = Math.min(0.49, Math.max(0, (holdSec || 0) / period));
+  const riseFrac = 0.5 - holdFrac;
+  let progress;
+  if (riseFrac <= 0) {
+    progress = phase < 0.5 ? 0 : 1;
+  } else if (phase < holdFrac) {
+    progress = 0;
+  } else if (phase < holdFrac + riseFrac) {
+    progress = (phase - holdFrac) / riseFrac;
+  } else if (phase < 2 * holdFrac + riseFrac) {
+    progress = 1;
+  } else {
+    progress = 1 - (phase - 2 * holdFrac - riseFrac) / riseFrac;
+  }
   const fn = EASINGS[easingName] || EASINGS.sineInOut;
-  return fn(tri);
+  return fn(progress);
 }
 
 function applyFontVariation() {
@@ -318,6 +370,10 @@ function buildGUI() {
   nike.add(state, 'playing').name('play');
   nike.add(state, 'period', 0.5, 10, 0.1).name('period (s)');
   nike.add(state, 'easing', Object.keys(EASINGS)).name('easing');
+  nike.add(state, 'hold', 0, 3, 0.05).name('hold (s)');
+  nike.add(state, 'phasePattern', PHASE_PATTERNS).name('phase pattern');
+  nike.add(state, 'phaseUnit', 0, 0.5, 0.005).name('phase unit');
+  nike.add(state, 'phaseSeed', 0, 9999, 1).name('phase seed');
   nike.add(state, 'manualTime', 0, 1, 0.001).name('manual time');
 
   const bsp = gui.addFolder('BSP');
