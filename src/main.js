@@ -1,6 +1,13 @@
 import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
 import { mulberry32 } from './rng.js';
 import { bspSplit } from './splitters/bsp.js';
+import {
+  startCamera,
+  stopCamera,
+  processFrame,
+  setPreviewCanvas,
+  cameraState,
+} from './camera.js';
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -54,6 +61,11 @@ const state = {
   manualTime: 0.5,
   showBorders: true,
   fitRatio: 1.0,
+  cameraEnabled: false,
+  mirrorCamera: true,
+  silhouetteBlend: 1.0,
+  motionInfluence: 0.7,
+  showPreview: true,
 };
 for (const axis of FONT_AXES) state[axis.tag] = axis.default;
 
@@ -250,13 +262,31 @@ function updateNikeLayout() {
   const h = stage.clientHeight;
   const cols = state.text.length || 1;
   const colW = w / cols;
-  const baseT = state.playing ? virtualTime : state.manualTime * state.period;
+
+  const camActive = state.cameraEnabled && cameraState.ready;
+  const motion = camActive ? cameraState.motion : 0;
+  const presence = camActive ? cameraState.presence : 0;
+  const motionT = motion * state.motionInfluence;
+  const periodAdj = state.period * (1 - motionT * 0.75);
+  const holdAdj = state.hold * (1 - motionT);
+  const holdFrac = Math.min(0.49, Math.max(0, holdAdj / Math.max(periodAdj, 0.01)));
+
+  const basePhase = state.playing ? phaseAccum : state.manualTime;
 
   const colTopH = new Array(cols);
   for (let i = 0; i < cols; i++) {
-    const t = baseT - getColPhaseOffset(i, cols);
-    const div = easedDivider(t, state.period, state.easing, state.hold);
-    colTopH[i] = Math.round(h * div);
+    const offsetFrac = getColPhaseOffset(i, cols);
+    const phase = (((basePhase - offsetFrac) % 1) + 1) % 1;
+    const synthDiv = easedDividerByPhase(phase, state.easing, holdFrac);
+
+    let finalDiv = synthDiv;
+    if (camActive && cameraState.silhouetteDivs.length === cols) {
+      const blend = Math.min(1, presence * state.silhouetteBlend);
+      const silh = cameraState.silhouetteDivs[i];
+      finalDiv = synthDiv * (1 - blend) + silh * blend;
+    }
+
+    colTopH[i] = Math.round(h * finalDiv);
   }
 
   for (const c of cells) {
@@ -270,22 +300,32 @@ function updateNikeLayout() {
   }
 }
 
-let virtualTime = 1.0;
+let phaseAccum = 0.25;
 let lastFrame = 0;
 
 function tick(now) {
   requestAnimationFrame(tick);
   const dt = lastFrame ? (now - lastFrame) / 1000 : 0;
   lastFrame = now;
+
+  if (state.cameraEnabled && cameraState.ready) {
+    processFrame(state.text.length || 1, state.mirrorCamera);
+  }
+
   if (state.mode === 'nikeBars') {
-    if (state.playing) virtualTime += dt;
+    if (state.playing) {
+      const motion = (state.cameraEnabled && cameraState.ready) ? cameraState.motion : 0;
+      const motionT = motion * state.motionInfluence;
+      const periodAdj = state.period * (1 - motionT * 0.75);
+      phaseAccum = (phaseAccum + dt / Math.max(periodAdj, 0.01)) % 1;
+    }
     updateNikeLayout();
   }
 }
 
 function getColPhaseOffset(col, totalCols) {
   if (state.phaseUnit <= 0 || totalCols <= 1) return 0;
-  const u = state.phaseUnit * state.period;
+  const u = state.phaseUnit;
   const c = (totalCols - 1) / 2;
   switch (state.phasePattern) {
     case 'leftToRight':
@@ -307,10 +347,7 @@ function getColPhaseOffset(col, totalCols) {
   }
 }
 
-function easedDivider(t, period, easingName, holdSec) {
-  if (period <= 0) return 0;
-  const phase = (((t / period) % 1) + 1) % 1;
-  const holdFrac = Math.min(0.49, Math.max(0, (holdSec || 0) / period));
+function easedDividerByPhase(phase, easingName, holdFrac) {
   const riseFrac = 0.5 - holdFrac;
   let progress;
   if (riseFrac <= 0) {
@@ -397,6 +434,26 @@ function buildGUI() {
     )
     .name('random seed');
 
+  const cam = gui.addFolder('Camera');
+  const camCtrl = cam.add(state, 'cameraEnabled').name('enable');
+  camCtrl.onChange(async (v) => {
+    if (v) {
+      const ok = await startCamera();
+      if (!ok) {
+        state.cameraEnabled = false;
+        camCtrl.updateDisplay();
+      }
+    } else {
+      stopCamera();
+    }
+  });
+  cam.add(state, 'mirrorCamera').name('mirror');
+  cam.add(state, 'silhouetteBlend', 0, 1, 0.01).name('silhouette blend');
+  cam.add(state, 'motionInfluence', 0, 1, 0.01).name('motion influence');
+  cam.add(state, 'showPreview').name('show preview').onChange((v) => {
+    if (previewEl) previewEl.hidden = !v;
+  });
+
   const axes = gui.addFolder('Font axes');
   for (const axis of FONT_AXES) {
     axes.add(state, axis.tag, axis.min, axis.max, axis.step).onChange(applyFontVariation);
@@ -414,6 +471,16 @@ function buildGUI() {
     )
     .name('reset axes');
 }
+
+const previewEl = document.createElement('div');
+previewEl.id = 'camera-preview';
+previewEl.hidden = !state.showPreview;
+const previewCanvas = document.createElement('canvas');
+previewCanvas.width = 240;
+previewCanvas.height = 180;
+previewEl.appendChild(previewCanvas);
+document.body.appendChild(previewEl);
+setPreviewCanvas(previewCanvas);
 
 setupMeasure();
 buildGUI();
