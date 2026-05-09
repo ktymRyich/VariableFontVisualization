@@ -238,7 +238,7 @@ function updateNikeLayout() {
   const cols = state.text.length || 1;
   const colW = w / cols;
   const div = computeDividerY();
-  const topH = h * div;
+  const topH = Math.round(h * div);
   const botH = h - topH;
   for (const c of cells) {
     const x = c.col * colW;
