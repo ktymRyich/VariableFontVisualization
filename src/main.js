@@ -22,6 +22,12 @@ const EASINGS = {
   sineInOut: (t) => (1 - Math.cos(Math.PI * t)) / 2,
   quadInOut: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
   cubicInOut: (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),
+  quintInOut: (t) =>
+    t < 0.5 ? 16 * t * t * t * t * t : 1 - Math.pow(-2 * t + 2, 5) / 2,
+  circInOut: (t) =>
+    t < 0.5
+      ? (1 - Math.sqrt(1 - Math.pow(2 * t, 2))) / 2
+      : (Math.sqrt(1 - Math.pow(-2 * t + 2, 2)) + 1) / 2,
   expoInOut: (t) =>
     t === 0
       ? 0
@@ -30,6 +36,14 @@ const EASINGS = {
       : t < 0.5
       ? Math.pow(2, 20 * t - 10) / 2
       : (2 - Math.pow(2, -20 * t + 10)) / 2,
+  expoStrongInOut: (t) =>
+    t <= 0
+      ? 0
+      : t >= 1
+      ? 1
+      : t < 0.5
+      ? Math.pow(2, 40 * t - 20) / 2
+      : (2 - Math.pow(2, -40 * t + 20)) / 2,
 };
 
 const FONT_AXES = [
@@ -53,7 +67,7 @@ const state = {
   text: 'NIKE',
   playing: true,
   period: 4.0,
-  easing: 'expoInOut',
+  easing: 'expoStrongInOut',
   hold: 0.5,
   phasePattern: 'leftToRight',
   phaseUnit: 0.05,
@@ -281,9 +295,11 @@ function updateNikeLayout() {
 
     let finalDiv = synthDiv;
     if (camActive && cameraState.silhouetteDivs.length === cols) {
-      const blend = Math.min(1, presence * state.silhouetteBlend);
       const silh = cameraState.silhouetteDivs[i];
-      finalDiv = synthDiv * (1 - blend) + silh * blend;
+      if (silh >= 0) {
+        const blend = Math.min(1, presence * state.silhouetteBlend);
+        finalDiv = synthDiv * (1 - blend) + silh * blend;
+      }
     }
 
     colTopH[i] = Math.round(h * finalDiv);
