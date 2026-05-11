@@ -8,6 +8,8 @@ import {
   setPreviewCanvas,
   cameraState,
 } from './camera.js';
+import { makeSpring } from './spring.js';
+import { sculptDivider, detectSnap } from './sculpt.js';
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -80,6 +82,15 @@ const state = {
   silhouetteBlend: 1.0,
   motionInfluence: 0.7,
   showPreview: true,
+  waveFloor: 0.55,
+  sculptK0: 0.35,
+  sculptK1: 0.65,
+  polyAmount: 0.18,
+  springStiff: 120,
+  springDamp: 14,
+  chromaMax: 5,
+  accentMix: 1.0,
+  snapStrength: 1.0,
 };
 for (const axis of FONT_AXES) state[axis.tag] = axis.default;
 
@@ -181,13 +192,26 @@ function makeCell(ch) {
   const el = document.createElement('div');
   el.className = 'cell' + (state.showBorders ? ' bordered' : '');
   const svg = document.createElementNS(SVG_NS, 'svg');
+  const ghostL = document.createElementNS(SVG_NS, 'text');
+  ghostL.setAttribute('class', 'ghost-l');
+  ghostL.setAttribute('text-anchor', 'middle');
+  ghostL.setAttribute('dominant-baseline', 'alphabetic');
+  ghostL.textContent = ch;
+  const ghostR = document.createElementNS(SVG_NS, 'text');
+  ghostR.setAttribute('class', 'ghost-r');
+  ghostR.setAttribute('text-anchor', 'middle');
+  ghostR.setAttribute('dominant-baseline', 'alphabetic');
+  ghostR.textContent = ch;
   const text = document.createElementNS(SVG_NS, 'text');
+  text.setAttribute('class', 'master');
   text.setAttribute('text-anchor', 'middle');
   text.setAttribute('dominant-baseline', 'alphabetic');
   text.textContent = ch;
+  svg.appendChild(ghostL);
+  svg.appendChild(ghostR);
   svg.appendChild(text);
   el.appendChild(svg);
-  return { el, svg, text, char: ch };
+  return { el, svg, text, ghostL, ghostR, char: ch };
 }
 
 function clearCells() {
@@ -210,6 +234,8 @@ function fitCell(c, natW, natH, actW = natW, actH = natH) {
 
   if (natW <= 0 || natH <= 0) {
     c.text.setAttribute('font-size', '0');
+    if (c.ghostL) c.ghostL.setAttribute('font-size', '0');
+    if (c.ghostR) c.ghostR.setAttribute('font-size', '0');
     return;
   }
 
@@ -226,11 +252,26 @@ function fitCell(c, natW, natH, actW = natW, actH = natH) {
 
   const cx = natW / 2;
   const cy = natH / 2 - (sample.bboxY + sample.bboxH / 2) * scale;
+  const variation = `"wght" ${state.wght}, "wdth" ${sample.wdth}, "SIZE" ${state.SIZE}`;
+  const cab = chromaPx;
 
   c.text.setAttribute('font-size', fontSize);
   c.text.setAttribute('x', cx);
   c.text.setAttribute('y', cy);
-  c.text.style.fontVariationSettings = `"wght" ${state.wght}, "wdth" ${sample.wdth}, "SIZE" ${state.SIZE}`;
+  c.text.style.fontVariationSettings = variation;
+
+  if (c.ghostL) {
+    c.ghostL.setAttribute('font-size', fontSize);
+    c.ghostL.setAttribute('x', cx - cab);
+    c.ghostL.setAttribute('y', cy);
+    c.ghostL.style.fontVariationSettings = variation;
+  }
+  if (c.ghostR) {
+    c.ghostR.setAttribute('font-size', fontSize);
+    c.ghostR.setAttribute('x', cx + cab);
+    c.ghostR.setAttribute('y', cy);
+    c.ghostR.style.fontVariationSettings = variation;
+  }
 }
 
 function buildBSP() {
@@ -259,6 +300,7 @@ function refitBSP() {
 function buildNike() {
   clearCells();
   const cols = state.text.length;
+  rebuildPerCol(cols);
   for (let row = 0; row < 2; row++) {
     for (let i = 0; i < cols; i++) {
       const c = makeCell(state.text[i]);
@@ -277,30 +319,51 @@ function updateNikeLayout() {
   const cols = state.text.length || 1;
   const colW = w / cols;
 
+  if (phaseAccums.length !== cols) rebuildPerCol(cols);
+
   const camActive = state.cameraEnabled && cameraState.ready;
-  const motion = camActive ? cameraState.motion : 0;
-  const presence = camActive ? cameraState.presence : 0;
-  const motionT = motion * state.motionInfluence;
+  const motionRaw = camActive ? cameraState.motion : 0;
+  const presenceRaw = camActive ? cameraState.presence : 0;
+  const motionS = motionSpring.value;
+  const presenceS = presenceSpring.value;
+  const motionT = motionRaw * state.motionInfluence;
   const periodAdj = state.period * (1 - motionT * 0.75);
   const holdAdj = state.hold * (1 - motionT);
   const holdFrac = Math.min(0.49, Math.max(0, holdAdj / Math.max(periodAdj, 0.01)));
 
-  const basePhase = state.playing ? phaseAccum : state.manualTime;
+  const sculptParams = {
+    waveFloorInv: 1 - state.waveFloor,
+    k0: state.sculptK0,
+    k1: state.sculptK1,
+  };
 
   const colTopH = new Array(cols);
   for (let i = 0; i < cols; i++) {
     const offsetFrac = getColPhaseOffset(i, cols);
-    const phase = (((basePhase - offsetFrac) % 1) + 1) % 1;
+    const localPhase = state.playing ? phaseAccums[i] : state.manualTime;
+    const phase = (((localPhase - offsetFrac) % 1) + 1) % 1;
     const synthDiv = easedDividerByPhase(phase, state.easing, holdFrac);
 
-    let finalDiv = synthDiv;
+    let silForSculpt = -1;
     if (camActive && cameraState.silhouetteDivs.length === cols) {
-      const silh = cameraState.silhouetteDivs[i];
-      if (silh >= 0) {
-        const blend = Math.min(1, presence * state.silhouetteBlend);
-        finalDiv = synthDiv * (1 - blend) + silh * blend;
+      const rawSilh = cameraState.silhouetteDivs[i];
+      if (rawSilh >= 0) {
+        silForSculpt = silSprings[i].value;
       }
     }
+
+    const finalDiv = sculptDivider(
+      synthDiv,
+      silForSculpt < 0 ? -1 : silForSculpt,
+      presenceS * state.silhouetteBlend,
+      motionS,
+      sculptParams
+    );
+
+    if (state.snapStrength > 0 && detectSnap(prevDivs[i], finalDiv)) {
+      snapPulses[i] = state.snapStrength;
+    }
+    prevDivs[i] = finalDiv;
 
     colTopH[i] = Math.round(h * finalDiv);
   }
@@ -314,10 +377,67 @@ function updateNikeLayout() {
     positionCell(c, x, y);
     fitCell(c, colW, h, colW, rh);
   }
+
+  for (let i = 0; i < cols; i++) {
+    const bar = snapBars[i];
+    if (!bar) continue;
+    const pulse = snapPulses[i];
+    snapPulses[i] = pulse * 0.86;
+    if (pulse < 0.02) {
+      bar.style.opacity = '0';
+      continue;
+    }
+    const dividerY = colTopH[i];
+    const barH = 2 + 8 * pulse;
+    bar.style.opacity = String(0.6 + 0.4 * pulse);
+    bar.style.transform = `translate(${i * colW}px, ${dividerY - barH / 2}px)`;
+    bar.style.width = colW + 'px';
+    bar.style.height = barH + 'px';
+  }
 }
 
-let phaseAccum = 0.25;
+let phaseAccums = [];
+let periodMuls = [];
+let silSprings = [];
+let prevDivs = [];
+let snapPulses = [];
+const presenceSpring = makeSpring(60, 12, 0);
+const motionSpring = makeSpring(40, 10, 0);
+let chromaPx = 0;
 let lastFrame = 0;
+let snapBars = [];
+let snapOverlay = null;
+
+function rebuildPerCol(cols) {
+  if (phaseAccums.length !== cols) {
+    phaseAccums = new Array(cols).fill(0).map((_, i) => 0.25 + i * 0.001);
+  }
+  buildPeriodMuls(cols);
+  silSprings = new Array(cols).fill(0).map(() => makeSpring(state.springStiff, state.springDamp, 0.5));
+  prevDivs = new Array(cols).fill(0.5);
+  snapPulses = new Array(cols).fill(0);
+  buildSnapBars(cols);
+}
+
+function buildPeriodMuls(cols) {
+  periodMuls = new Array(cols);
+  const rng = mulberry32(((state.phaseSeed * 7919 + 1) >>> 0) || 1);
+  for (let i = 0; i < cols; i++) {
+    periodMuls[i] = 1 + (rng() - 0.5) * state.polyAmount;
+  }
+}
+
+function buildSnapBars(cols) {
+  if (!snapOverlay) return;
+  snapOverlay.innerHTML = '';
+  snapBars = [];
+  for (let i = 0; i < cols; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'snap-bar';
+    snapOverlay.appendChild(bar);
+    snapBars.push(bar);
+  }
+}
 
 function tick(now) {
   requestAnimationFrame(tick);
@@ -329,12 +449,35 @@ function tick(now) {
   }
 
   if (state.mode === 'nikeBars') {
-    if (state.playing) {
-      const motion = (state.cameraEnabled && cameraState.ready) ? cameraState.motion : 0;
-      const motionT = motion * state.motionInfluence;
-      const periodAdj = state.period * (1 - motionT * 0.75);
-      phaseAccum = (phaseAccum + dt / Math.max(periodAdj, 0.01)) % 1;
+    const cols = state.text.length || 1;
+    if (phaseAccums.length !== cols) rebuildPerCol(cols);
+
+    const camActive = state.cameraEnabled && cameraState.ready;
+    presenceSpring.step(dt, camActive ? cameraState.presence : 0);
+    motionSpring.step(dt, camActive ? cameraState.motion : 0);
+
+    if (camActive) {
+      for (let i = 0; i < cols; i++) {
+        const raw = cameraState.silhouetteDivs[i];
+        if (raw >= 0) silSprings[i].step(dt, raw);
+      }
     }
+
+    if (state.playing) {
+      const motionT = (camActive ? cameraState.motion : 0) * state.motionInfluence;
+      const periodAdj = state.period * (1 - motionT * 0.75);
+      const periodSafe = Math.max(periodAdj, 0.01);
+      for (let i = 0; i < cols; i++) {
+        const mul = periodMuls[i] || 1;
+        phaseAccums[i] = (phaseAccums[i] + dt / (periodSafe * mul)) % 1;
+      }
+    }
+
+    const vibe = Math.min(1, presenceSpring.value * 0.6 + motionSpring.value * 0.7);
+    chromaPx = state.chromaMax * (0.05 + 0.95 * motionSpring.value);
+    document.documentElement.style.setProperty('--vibe', vibe.toFixed(3));
+    document.documentElement.style.setProperty('--accent-mix', (state.accentMix * vibe).toFixed(3));
+
     updateNikeLayout();
   }
 }
@@ -470,6 +613,23 @@ function buildGUI() {
     if (previewEl) previewEl.hidden = !v;
   });
 
+  const sculpt = gui.addFolder('Sculpt');
+  sculpt.add(state, 'waveFloor', 0.2, 1.0, 0.01).name('wave floor');
+  sculpt.add(state, 'sculptK0', 0, 1, 0.01).name('sculpt @presence');
+  sculpt.add(state, 'sculptK1', 0, 1, 0.01).name('sculpt @motion');
+  sculpt.add(state, 'polyAmount', 0, 0.4, 0.005).name('polyrhythm').onChange(() => {
+    if (state.mode === 'nikeBars') buildPeriodMuls(state.text.length || 1);
+  });
+  sculpt.add(state, 'springStiff', 20, 300, 1).name('spring stiff').onChange(() => {
+    rebuildPerCol(state.text.length || 1);
+  });
+  sculpt.add(state, 'springDamp', 4, 40, 0.5).name('spring damp').onChange(() => {
+    rebuildPerCol(state.text.length || 1);
+  });
+  sculpt.add(state, 'chromaMax', 0, 12, 0.1).name('chroma max (px)');
+  sculpt.add(state, 'accentMix', 0, 1, 0.01).name('accent mix');
+  sculpt.add(state, 'snapStrength', 0, 2, 0.01).name('snap');
+
   const axes = gui.addFolder('Font axes');
   for (const axis of FONT_AXES) {
     axes.add(state, axis.tag, axis.min, axis.max, axis.step).onChange(applyFontVariation);
@@ -497,6 +657,10 @@ previewCanvas.height = 180;
 previewEl.appendChild(previewCanvas);
 document.body.appendChild(previewEl);
 setPreviewCanvas(previewCanvas);
+
+snapOverlay = document.createElement('div');
+snapOverlay.id = 'snap-overlay';
+stage.appendChild(snapOverlay);
 
 setupMeasure();
 buildGUI();

@@ -4,6 +4,15 @@
   font-display: block;
 }
 
+:root {
+  --bg: #0a0a0a;
+  --fg: #f5f1e8;
+  --accent: #ff3b1f;
+  --ghost-l: #00d4ff;
+  --vibe: 0;
+  --accent-mix: 0;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -14,17 +23,19 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #ffffff;
+  background: var(--bg);
 }
 
 body {
   font-family: 'TDCVariable', system-ui, sans-serif;
-  color: #000000;
+  color: var(--fg);
 }
 
 #stage {
   position: fixed;
   inset: 0;
+  filter: contrast(calc(1 + var(--vibe) * 0.18)) saturate(calc(1 + var(--vibe) * 0.6));
+  transition: filter 0.12s linear;
 }
 
 .cell {
@@ -32,12 +43,12 @@ body {
   overflow: hidden;
   line-height: 1;
   user-select: none;
-  background: #ffffff;
-  color: #000000;
+  background: var(--bg);
+  color: var(--fg);
 }
 
 .cell.bordered {
-  border: 1px solid #000000;
+  border: 1px solid rgba(245, 241, 232, 0.18);
 }
 
 .cell svg {
@@ -46,8 +57,37 @@ body {
   height: 100%;
 }
 
-.cell text {
-  fill: currentColor;
+.cell text.master {
+  fill: color-mix(in oklab, var(--fg), var(--accent) calc(var(--accent-mix) * 60%));
+}
+
+.cell text.ghost-l {
+  fill: var(--ghost-l);
+  mix-blend-mode: screen;
+  opacity: 0.85;
+}
+
+.cell text.ghost-r {
+  fill: var(--accent);
+  mix-blend-mode: screen;
+  opacity: 0.85;
+}
+
+#snap-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  mix-blend-mode: difference;
+  z-index: 10;
+}
+
+.snap-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background: #ffffff;
+  opacity: 0;
+  will-change: transform, opacity, height;
 }
 
 #camera-preview {
@@ -57,7 +97,7 @@ body {
   width: 240px;
   height: 180px;
   background: #000;
-  border: 1px solid rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(245, 241, 232, 0.25);
   pointer-events: none;
   z-index: 100;
   overflow: hidden;
