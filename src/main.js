@@ -368,6 +368,13 @@ function updateNikeLayout() {
     colTopH[i] = Math.round(h * finalDiv);
   }
 
+  const camHasBody = new Array(cols).fill(false);
+  if (camActive && cameraState.silhouetteDivs.length === cols) {
+    for (let i = 0; i < cols; i++) {
+      camHasBody[i] = cameraState.silhouetteDivs[i] >= 0;
+    }
+  }
+
   for (const c of cells) {
     const x = c.col * colW;
     const topH = colTopH[c.col];
@@ -376,6 +383,32 @@ function updateNikeLayout() {
     const rh = c.row === 0 ? topH : botH;
     positionCell(c, x, y);
     fitCell(c, colW, h, colW, rh);
+    const cellVibe = camHasBody[c.col] ? presenceS : 0;
+    c.el.style.setProperty('--cell-vibe', cellVibe.toFixed(3));
+  }
+
+  if (silhouetteContour && silhouetteContourPath) {
+    silhouetteContour.setAttribute('viewBox', `0 0 ${Math.max(w, 1)} ${Math.max(h, 1)}`);
+    silhouetteContour.setAttribute('width', w);
+    silhouetteContour.setAttribute('height', h);
+    let path = '';
+    let drawing = false;
+    if (camActive) {
+      for (let i = 0; i < cols; i++) {
+        if (camHasBody[i]) {
+          const cx = (i + 0.5) * colW;
+          const cy = silSprings[i].value * h;
+          path += (drawing ? ' L ' : 'M ') + cx.toFixed(1) + ' ' + cy.toFixed(1);
+          drawing = true;
+        } else {
+          drawing = false;
+        }
+      }
+    }
+    silhouetteContourPath.setAttribute('d', path);
+    silhouetteContourPath.setAttribute('stroke-width', String(3 + 10 * motionS));
+    const baseOpacity = camActive ? presenceS * state.silhouetteBlend : 0;
+    silhouetteContour.style.opacity = baseOpacity.toFixed(3);
   }
 
   for (let i = 0; i < cols; i++) {
@@ -407,6 +440,8 @@ let chromaPx = 0;
 let lastFrame = 0;
 let snapBars = [];
 let snapOverlay = null;
+let silhouetteContour = null;
+let silhouetteContourPath = null;
 
 function rebuildPerCol(cols) {
   if (phaseAccums.length !== cols) {
@@ -661,6 +696,13 @@ setPreviewCanvas(previewCanvas);
 snapOverlay = document.createElement('div');
 snapOverlay.id = 'snap-overlay';
 stage.appendChild(snapOverlay);
+
+silhouetteContour = document.createElementNS(SVG_NS, 'svg');
+silhouetteContour.id = 'silhouette-contour';
+silhouetteContour.setAttribute('preserveAspectRatio', 'none');
+silhouetteContourPath = document.createElementNS(SVG_NS, 'path');
+silhouetteContour.appendChild(silhouetteContourPath);
+stage.appendChild(silhouetteContour);
 
 setupMeasure();
 buildGUI();
