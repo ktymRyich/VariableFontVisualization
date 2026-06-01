@@ -14,7 +14,7 @@ import { INTERACTIONS, INTERACTION_NAMES } from './interactions.js';
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const MODES = ['nikeBars', 'bsp'];
+const MODES = ['nikeBars', 'bsp', 'monolith', 'ticker', 'matrix'];
 const REF_FS = 100;
 const LUT_SAMPLES = 32;
 const WDTH_MIN = 100;
@@ -474,6 +474,7 @@ let trailHistory = [];
 const TRAIL_LEN = 26;
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const lerp = (a, b, t) => a + (b - a) * t;
 
 function updateTrail(interaction, camActive, cols, colW, h, colTopH) {
   if (!trailCanvas || !trailCtx) return;
@@ -560,13 +561,18 @@ function tick(now) {
     processFrame(state.text.length || 1, state.mirrorCamera);
   }
 
+  const camActive = state.cameraEnabled && cameraState.ready;
+  presenceSpring.step(dt, camActive ? cameraState.presence : 0);
+  motionSpring.step(dt, camActive ? cameraState.motion : 0);
+
+  const vibe = Math.min(1, presenceSpring.value * 0.6 + motionSpring.value * 0.7);
+  chromaPx = state.chromaMax * (0.05 + 0.95 * motionSpring.value);
+  document.documentElement.style.setProperty('--vibe', vibe.toFixed(3));
+  document.documentElement.style.setProperty('--accent-mix', (state.accentMix * vibe).toFixed(3));
+
   if (state.mode === 'nikeBars') {
     const cols = state.text.length || 1;
     if (phaseAccums.length !== cols) rebuildPerCol(cols);
-
-    const camActive = state.cameraEnabled && cameraState.ready;
-    presenceSpring.step(dt, camActive ? cameraState.presence : 0);
-    motionSpring.step(dt, camActive ? cameraState.motion : 0);
 
     if (camActive) {
       const haveCols = cameraState.colTop.length === cols;
@@ -590,12 +596,13 @@ function tick(now) {
       }
     }
 
-    const vibe = Math.min(1, presenceSpring.value * 0.6 + motionSpring.value * 0.7);
-    chromaPx = state.chromaMax * (0.05 + 0.95 * motionSpring.value);
-    document.documentElement.style.setProperty('--vibe', vibe.toFixed(3));
-    document.documentElement.style.setProperty('--accent-mix', (state.accentMix * vibe).toFixed(3));
-
     updateNikeLayout();
+  } else if (state.mode === 'monolith') {
+    updateMonolith(dt);
+  } else if (state.mode === 'ticker') {
+    updateTicker(dt);
+  } else if (state.mode === 'matrix') {
+    updateMatrix(dt);
   }
 }
 
@@ -651,17 +658,346 @@ function rebuild() {
     trailHistory = [];
     trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
   }
+  teardownExtraModes();
   if (state.mode === 'bsp') buildBSP();
+  else if (state.mode === 'monolith') buildMonolith();
+  else if (state.mode === 'ticker') buildTicker();
+  else if (state.mode === 'matrix') buildMatrix();
   else buildNike();
 }
 
 function refitAll() {
   if (state.mode === 'bsp') refitBSP();
+  else if (state.mode === 'monolith') fitMonolith();
+  else if (state.mode === 'ticker') fitTicker();
+  else if (state.mode === 'matrix') fitMatrix();
   else updateNikeLayout();
+}
+
+function teardownExtraModes() {
+  if (monolithCell) {
+    monolithCell.el.remove();
+    monolithCell = null;
+  }
+  for (const row of tickerRows) row.el.remove();
+  tickerRows = [];
+  for (const col of matrixCols) col.el.remove();
+  matrixCols = [];
 }
 
 function applyBorders() {
   for (const c of cells) c.el.classList.toggle('bordered', state.showBorders);
+}
+
+// ===== monolith =====
+// One huge NIKE filling the screen. Camera modulates wght / wdth / position.
+let monolithCell = null;
+
+function buildMonolith() {
+  clearCells();
+  const el = document.createElement('div');
+  el.className = 'mode-monolith';
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('preserveAspectRatio', 'none');
+  const text = document.createElementNS(SVG_NS, 'text');
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('dominant-baseline', 'alphabetic');
+  text.setAttribute('class', 'monolith-text');
+  text.textContent = 'NIKE';
+  svg.appendChild(text);
+  el.appendChild(svg);
+  stage.appendChild(el);
+  monolithCell = { el, svg, text };
+  fitMonolith();
+}
+
+function fitMonolith() {
+  if (!monolithCell) return;
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  const c = monolithCell;
+  c.el.style.position = 'absolute';
+  c.el.style.left = '0';
+  c.el.style.top = '0';
+  c.el.style.width = w + 'px';
+  c.el.style.height = h + 'px';
+  c.el.style.overflow = 'hidden';
+  c.svg.setAttribute('width', w);
+  c.svg.setAttribute('height', h);
+  c.svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+}
+
+function updateMonolith(dt) {
+  if (!monolithCell) return;
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  if (w !== monolithCell.lastW || h !== monolithCell.lastH) {
+    fitMonolith();
+    monolithCell.lastW = w;
+    monolithCell.lastH = h;
+  }
+  const camActive = state.cameraEnabled && cameraState.ready;
+  const p = presenceSpring.value;
+  const m = motionSpring.value;
+  const baseWght = camActive ? lerp(state.wght, 1000, p) : state.wght;
+  const baseWdth = 1000;
+  const wdthMod = camActive ? lerp(baseWdth, 7500, Math.min(1, m * 1.6)) : baseWdth;
+  const variation = `"wght" ${baseWght.toFixed(0)}, "wdth" ${wdthMod.toFixed(0)}, "SIZE" ${state.SIZE}`;
+  const text = monolithCell.text;
+  text.style.fontVariationSettings = variation;
+  // First pass: set font-size 100 to measure
+  text.setAttribute('font-size', '100');
+  let bbox;
+  try {
+    bbox = text.getBBox();
+  } catch {
+    return;
+  }
+  if (!bbox || bbox.width === 0 || bbox.height === 0) return;
+  const fs = Math.min(w / bbox.width, h / bbox.height) * 100 * state.fitRatio;
+  text.setAttribute('font-size', fs);
+  const scale = fs / 100;
+  const cx = w / 2;
+  const cy = h / 2 - (bbox.y + bbox.height / 2) * scale;
+  // centroid-driven horizontal shift (up to 8% width)
+  const shiftX = camActive && cameraState.centroidX >= 0
+    ? (cameraState.centroidX - 0.5) * w * 0.08 * p
+    : 0;
+  const shiftY = camActive && cameraState.centroidY >= 0
+    ? (cameraState.centroidY - 0.5) * h * 0.04 * p
+    : 0;
+  text.setAttribute('x', cx + shiftX);
+  text.setAttribute('y', cy + shiftY);
+}
+
+// ===== ticker =====
+// Multiple horizontal stripes of "NIKE NIKE..." scrolling.
+let tickerRows = [];
+const TICKER_ROWS = 6;
+const TICKER_TEXT = ' NIKE'.repeat(30);
+
+function buildTicker() {
+  clearCells();
+  tickerRows = [];
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  const rowH = h / TICKER_ROWS;
+  for (let i = 0; i < TICKER_ROWS; i++) {
+    const row = makeTickerRow(i, w, rowH);
+    row.el.style.top = (i * rowH) + 'px';
+    stage.appendChild(row.el);
+    tickerRows.push(row);
+  }
+}
+
+function makeTickerRow(idx, w, rowH) {
+  const el = document.createElement('div');
+  el.className = 'ticker-row';
+  el.style.position = 'absolute';
+  el.style.left = '0';
+  el.style.width = '100%';
+  el.style.height = rowH + 'px';
+  el.style.overflow = 'hidden';
+
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('width', w);
+  svg.setAttribute('height', rowH);
+  svg.setAttribute('viewBox', `0 0 ${w} ${rowH}`);
+
+  const group = document.createElementNS(SVG_NS, 'g');
+  const text1 = document.createElementNS(SVG_NS, 'text');
+  text1.setAttribute('y', rowH * 0.78);
+  text1.setAttribute('x', 0);
+  text1.setAttribute('dominant-baseline', 'alphabetic');
+  text1.textContent = TICKER_TEXT;
+  const text2 = document.createElementNS(SVG_NS, 'text');
+  text2.setAttribute('y', rowH * 0.78);
+  text2.setAttribute('dominant-baseline', 'alphabetic');
+  text2.textContent = TICKER_TEXT;
+
+  group.appendChild(text1);
+  group.appendChild(text2);
+  svg.appendChild(group);
+  el.appendChild(svg);
+
+  const wghts = [180, 320, 540, 760, 920, 420];
+  const wght = wghts[idx % wghts.length];
+  const speeds = [-220, 140, -90, 260, -180, 110];
+  const speed = speeds[idx % speeds.length];
+  const variation = `"wght" ${wght}, "wdth" 600, "SIZE" 1000`;
+  text1.style.fontVariationSettings = variation;
+  text2.style.fontVariationSettings = variation;
+  text1.setAttribute('font-size', rowH * 0.9);
+  text2.setAttribute('font-size', rowH * 0.9);
+  text1.style.fill = 'var(--fg)';
+  text2.style.fill = 'var(--fg)';
+
+  return { el, svg, group, text1, text2, speed, wght, idx, rowH, offset: 0, textW: 0, lastW: w };
+}
+
+function fitTicker() {
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  if (!tickerRows.length || tickerRows[0].rowH !== h / TICKER_ROWS) {
+    buildTicker();
+    return;
+  }
+  for (const row of tickerRows) {
+    row.svg.setAttribute('width', w);
+    row.svg.setAttribute('viewBox', `0 0 ${w} ${row.rowH}`);
+    row.lastW = w;
+    row.textW = 0; // force re-measure
+  }
+}
+
+function updateTicker(dt) {
+  if (!tickerRows.length) return;
+  const w = stage.clientWidth;
+  if (w !== tickerRows[0].lastW) fitTicker();
+  const camActive = state.cameraEnabled && cameraState.ready;
+  const m = motionSpring.value;
+  const p = presenceSpring.value;
+  const accel = 1 + m * 3;
+  for (const row of tickerRows) {
+    if (!row.textW) {
+      try {
+        row.textW = row.text1.getBBox().width;
+      } catch {
+        row.textW = 0;
+      }
+      if (!row.textW) continue;
+      row.text2.setAttribute('x', row.textW);
+    }
+    row.offset = (row.offset + row.speed * accel * dt) % row.textW;
+    if (row.offset < 0) row.offset += row.textW;
+    row.group.setAttribute('transform', `translate(${-row.offset}, 0)`);
+    // body-driven row tint: rows close to centroidY light up
+    let rowTint = 0;
+    if (camActive && cameraState.centroidY >= 0) {
+      const rowMid = (row.idx + 0.5) / TICKER_ROWS;
+      const dist = Math.abs(rowMid - cameraState.centroidY);
+      rowTint = Math.max(0, 1 - dist * 3.5) * p;
+    }
+    const fill = rowTint > 0.02
+      ? `color-mix(in oklab, var(--fg), var(--accent) ${(rowTint * 90).toFixed(1)}%)`
+      : 'var(--fg)';
+    row.text1.style.fill = fill;
+    row.text2.style.fill = fill;
+  }
+}
+
+// ===== matrix =====
+// Vertical streams of NIKE letters per column.
+let matrixCols = [];
+const MATRIX_COLS = 12;
+
+function buildMatrix() {
+  clearCells();
+  matrixCols = [];
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  const colW = w / MATRIX_COLS;
+  for (let i = 0; i < MATRIX_COLS; i++) {
+    const col = makeMatrixCol(i, colW, h);
+    col.el.style.left = (i * colW) + 'px';
+    stage.appendChild(col.el);
+    matrixCols.push(col);
+  }
+}
+
+function makeMatrixCol(idx, colW, h) {
+  const el = document.createElement('div');
+  el.className = 'matrix-col';
+  el.style.position = 'absolute';
+  el.style.top = '0';
+  el.style.width = colW + 'px';
+  el.style.height = h + 'px';
+  el.style.overflow = 'hidden';
+
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('width', colW);
+  svg.setAttribute('height', h);
+  svg.setAttribute('viewBox', `0 0 ${colW} ${h}`);
+
+  const group = document.createElementNS(SVG_NS, 'g');
+  const lineH = colW * 1.15;
+  const chars = Math.ceil(h / lineH) + 4;
+  const fontSize = lineH * 0.95;
+  for (let k = 0; k < chars * 2; k++) {
+    const t = document.createElementNS(SVG_NS, 'text');
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('dominant-baseline', 'central');
+    t.setAttribute('x', colW / 2);
+    t.setAttribute('y', k * lineH);
+    t.setAttribute('font-size', fontSize);
+    t.textContent = 'NIKE'[k % 4];
+    t.style.fontVariationSettings = '"wght" 540, "wdth" 600, "SIZE" 1000';
+    group.appendChild(t);
+  }
+  svg.appendChild(group);
+  el.appendChild(svg);
+
+  const baseSpeeds = [110, 70, 160, 95, 200, 130, 85, 145, 175, 100, 230, 60];
+  const baseSpeed = baseSpeeds[idx % baseSpeeds.length];
+  return { el, svg, group, chars, lineH, fontSize, colW, h, idx, offset: 0, baseSpeed };
+}
+
+function fitMatrix() {
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  if (matrixCols.length !== MATRIX_COLS || matrixCols[0].h !== h) {
+    buildMatrix();
+    return;
+  }
+  const colW = w / MATRIX_COLS;
+  for (let i = 0; i < matrixCols.length; i++) {
+    const col = matrixCols[i];
+    col.el.style.left = (i * colW) + 'px';
+    col.el.style.width = colW + 'px';
+    col.svg.setAttribute('width', colW);
+    col.svg.setAttribute('viewBox', `0 0 ${colW} ${h}`);
+    col.colW = colW;
+  }
+}
+
+function updateMatrix(dt) {
+  if (!matrixCols.length) return;
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  if (w / MATRIX_COLS !== matrixCols[0].colW) fitMatrix();
+  const camActive = state.cameraEnabled && cameraState.ready;
+  const haveCols = camActive && cameraState.colTop.length === MATRIX_COLS;
+  for (let i = 0; i < matrixCols.length; i++) {
+    const col = matrixCols[i];
+    // body slowing factor per column (1 = unchanged, 0 = stopped)
+    let bodyHere = 0;
+    if (haveCols) {
+      const top = cameraState.colTop[i];
+      if (top >= 0) bodyHere = presenceSpring.value;
+    }
+    const slow = 1 - bodyHere * 0.85;
+    const speed = col.baseSpeed * slow;
+    col.offset = (col.offset + speed * dt) % col.lineH;
+    col.group.setAttribute('transform', `translate(0, ${col.offset})`);
+    // weight + color shift on bodied columns
+    const wght = lerp(540, 1000, bodyHere);
+    const variation = `"wght" ${wght.toFixed(0)}, "wdth" 600, "SIZE" 1000`;
+    const fill = bodyHere > 0.02
+      ? `color-mix(in oklab, var(--fg), var(--accent) ${(bodyHere * 90).toFixed(1)}%)`
+      : 'var(--fg)';
+    // Only update children when bodyHere meaningfully changes (cheap heuristic)
+    const lastFill = col.lastFill;
+    const lastWght = col.lastWght;
+    if (Math.abs((lastWght || 0) - wght) > 6 || lastFill !== fill) {
+      const children = col.group.children;
+      for (let k = 0; k < children.length; k++) {
+        children[k].style.fontVariationSettings = variation;
+        children[k].style.fill = fill;
+      }
+      col.lastWght = wght;
+      col.lastFill = fill;
+    }
+  }
 }
 
 function buildGUI() {
@@ -804,8 +1140,7 @@ rebuild();
 requestAnimationFrame(tick);
 
 window.addEventListener('resize', () => {
-  if (state.mode === 'bsp') buildBSP();
-  else updateNikeLayout();
+  refitAll();
 });
 
 if (document.fonts && document.fonts.ready) {
