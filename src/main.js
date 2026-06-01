@@ -9,7 +9,8 @@ import {
   cameraState,
 } from './camera.js';
 import { makeSpring } from './spring.js';
-import { sculptDivider, detectSnap } from './sculpt.js';
+import { detectSnap } from './sculpt.js';
+import { INTERACTIONS, INTERACTION_NAMES } from './interactions.js';
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -79,6 +80,7 @@ const state = {
   fitRatio: 1.0,
   cameraEnabled: false,
   mirrorCamera: true,
+  interaction: 'sculpt',
   silhouetteBlend: 1.0,
   motionInfluence: 0.7,
   showPreview: true,
@@ -224,7 +226,7 @@ function positionCell(c, x, y) {
   c.el.style.top = y + 'px';
 }
 
-function fitCell(c, natW, natH, actW = natW, actH = natH) {
+function fitCell(c, natW, natH, actW = natW, actH = natH, wghtOverride = null) {
   c.el.style.width = actW + 'px';
   c.el.style.height = actH + 'px';
   c.svg.setAttribute('width', actW);
@@ -252,7 +254,8 @@ function fitCell(c, natW, natH, actW = natW, actH = natH) {
 
   const cx = natW / 2;
   const cy = natH / 2 - (sample.bboxY + sample.bboxH / 2) * scale;
-  const variation = `"wght" ${state.wght}, "wdth" ${sample.wdth}, "SIZE" ${state.SIZE}`;
+  const wght = wghtOverride == null ? state.wght : wghtOverride;
+  const variation = `"wght" ${wght}, "wdth" ${sample.wdth}, "SIZE" ${state.SIZE}`;
   const cab = chromaPx;
 
   c.text.setAttribute('font-size', fontSize);
@@ -323,7 +326,6 @@ function updateNikeLayout() {
 
   const camActive = state.cameraEnabled && cameraState.ready;
   const motionRaw = camActive ? cameraState.motion : 0;
-  const presenceRaw = camActive ? cameraState.presence : 0;
   const motionS = motionSpring.value;
   const presenceS = presenceSpring.value;
   const motionT = motionRaw * state.motionInfluence;
@@ -331,51 +333,106 @@ function updateNikeLayout() {
   const holdAdj = state.hold * (1 - motionT);
   const holdFrac = Math.min(0.49, Math.max(0, holdAdj / Math.max(periodAdj, 0.01)));
 
-  const sculptParams = {
-    waveFloorInv: 1 - state.waveFloor,
-    k0: state.sculptK0,
-    k1: state.sculptK1,
-  };
-
-  const colTopH = new Array(cols);
+  // synthetic wave + per-column body data
+  const synth = new Array(cols);
+  const silTop = new Array(cols);
+  const silBottom = new Array(cols);
+  const coverage = new Array(cols);
+  const colMotion = new Array(cols);
+  const camHasBody = new Array(cols);
+  const haveCols = camActive && cameraState.colTop.length === cols;
   for (let i = 0; i < cols; i++) {
     const offsetFrac = getColPhaseOffset(i, cols);
     const localPhase = state.playing ? phaseAccums[i] : state.manualTime;
     const phase = (((localPhase - offsetFrac) % 1) + 1) % 1;
-    const synthDiv = easedDividerByPhase(phase, state.easing, holdFrac);
+    synth[i] = easedDividerByPhase(phase, state.easing, holdFrac);
 
-    let silForSculpt = -1;
-    if (camActive && cameraState.silhouetteDivs.length === cols) {
-      const rawSilh = cameraState.silhouetteDivs[i];
-      if (rawSilh >= 0) {
-        silForSculpt = silSprings[i].value;
-      }
-    }
+    const has = haveCols && cameraState.colTop[i] >= 0;
+    camHasBody[i] = has;
+    silTop[i] = has ? silSprings[i].value : -1;
+    silBottom[i] = has ? cameraState.colBottom[i] : -1;
+    coverage[i] = camActive ? covSmooth[i] || 0 : 0;
+    colMotion[i] = haveCols ? cameraState.colMotion[i] || 0 : 0;
+  }
 
-    const finalDiv = sculptDivider(
-      synthDiv,
-      silForSculpt < 0 ? -1 : silForSculpt,
-      presenceS * state.silhouetteBlend,
-      motionS,
-      sculptParams
-    );
+  const ctx = {
+    cols,
+    w,
+    h,
+    colW,
+    t: nowSeconds,
+    presence: presenceS,
+    motion: motionS,
+    blend: state.silhouetteBlend,
+    camActive,
+    synth,
+    silTop,
+    silBottom,
+    coverage,
+    colMotion,
+    centroidX: camActive ? cameraState.centroidX : -1,
+    centroidY: camActive ? cameraState.centroidY : -1,
+    state,
+    EASINGS,
+  };
 
-    if (state.snapStrength > 0 && detectSnap(prevDivs[i], finalDiv)) {
+  const interaction = INTERACTIONS[state.interaction] || INTERACTIONS.sculpt;
+  const field = interaction.compute(ctx);
+
+  const colTopH = new Array(cols);
+  for (let i = 0; i < cols; i++) {
+    const d = clamp01(field.divider[i]);
+    if (state.snapStrength > 0 && detectSnap(prevDivs[i], d)) {
       snapPulses[i] = state.snapStrength;
     }
-    prevDivs[i] = finalDiv;
-
-    colTopH[i] = Math.round(h * finalDiv);
+    prevDivs[i] = d;
+    colTopH[i] = Math.round(h * d);
   }
 
   for (const c of cells) {
-    const x = c.col * colW;
-    const topH = colTopH[c.col];
+    const col = c.col;
+    const isTop = c.row === 0;
+    const topH = colTopH[col];
     const botH = h - topH;
-    const y = c.row === 0 ? 0 : topH;
-    const rh = c.row === 0 ? topH : botH;
+    const x = col * colW;
+    const y = isTop ? 0 : topH;
+    const rh = isTop ? topH : botH;
+    const wght = isTop ? field.topWght[col] : field.botWght[col];
     positionCell(c, x, y);
-    fitCell(c, colW, h, colW, rh);
+    fitCell(c, colW, h, colW, rh, wght);
+    const tint = isTop ? field.topTint[col] : field.botTint[col];
+    c.el.style.setProperty('--cell-vibe', clamp01(tint).toFixed(3));
+    const dx = isTop ? field.topDx[col] : field.botDx[col];
+    const dy = isTop ? field.topDy[col] : field.botDy[col];
+    c.el.style.transform = dx || dy ? `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)` : '';
+    const op = isTop ? field.topOpacity[col] : field.botOpacity[col];
+    c.el.style.opacity = op >= 1 ? '' : clamp01(op).toFixed(3);
+  }
+
+  updateTrail(interaction, camActive, cols, colW, h, colTopH);
+
+  if (silhouetteContour && silhouetteContourPath) {
+    silhouetteContour.setAttribute('viewBox', `0 0 ${Math.max(w, 1)} ${Math.max(h, 1)}`);
+    silhouetteContour.setAttribute('width', w);
+    silhouetteContour.setAttribute('height', h);
+    let path = '';
+    let drawing = false;
+    if (camActive && !interaction.usesTrail) {
+      for (let i = 0; i < cols; i++) {
+        if (camHasBody[i]) {
+          const cx = (i + 0.5) * colW;
+          const cy = silSprings[i].value * h;
+          path += (drawing ? ' L ' : 'M ') + cx.toFixed(1) + ' ' + cy.toFixed(1);
+          drawing = true;
+        } else {
+          drawing = false;
+        }
+      }
+    }
+    silhouetteContourPath.setAttribute('d', path);
+    silhouetteContourPath.setAttribute('stroke-width', String(3 + 10 * motionS));
+    const baseOpacity = camActive ? presenceS * state.silhouetteBlend : 0;
+    silhouetteContour.style.opacity = baseOpacity.toFixed(3);
   }
 
   for (let i = 0; i < cols; i++) {
@@ -401,12 +458,65 @@ let periodMuls = [];
 let silSprings = [];
 let prevDivs = [];
 let snapPulses = [];
+let covSmooth = [];
 const presenceSpring = makeSpring(60, 12, 0);
 const motionSpring = makeSpring(40, 10, 0);
 let chromaPx = 0;
+let nowSeconds = 0;
 let lastFrame = 0;
 let snapBars = [];
 let snapOverlay = null;
+let silhouetteContour = null;
+let silhouetteContourPath = null;
+let trailCanvas = null;
+let trailCtx = null;
+let trailHistory = [];
+const TRAIL_LEN = 26;
+
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+function updateTrail(interaction, camActive, cols, colW, h, colTopH) {
+  if (!trailCanvas || !trailCtx) return;
+  if (!interaction.usesTrail || !camActive) {
+    if (trailHistory.length) {
+      trailHistory = [];
+      trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
+    }
+    return;
+  }
+  if (
+    trailCanvas.width !== Math.round(stage.clientWidth) ||
+    trailCanvas.height !== Math.round(stage.clientHeight)
+  ) {
+    trailCanvas.width = Math.round(stage.clientWidth);
+    trailCanvas.height = Math.round(stage.clientHeight);
+  }
+
+  trailHistory.push(colTopH.slice(0, cols));
+  if (trailHistory.length > TRAIL_LEN) trailHistory.shift();
+
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ff3b1f';
+  trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
+  trailCtx.strokeStyle = accent;
+  trailCtx.lineCap = 'round';
+  trailCtx.lineJoin = 'round';
+  const n = trailHistory.length;
+  for (let k = 0; k < n; k++) {
+    const seam = trailHistory[k];
+    const age = (k + 1) / n; // newest -> 1
+    trailCtx.globalAlpha = age * age * 0.55;
+    trailCtx.lineWidth = (1 + 6 * motionSpring.value) * age;
+    trailCtx.beginPath();
+    for (let i = 0; i < seam.length; i++) {
+      const x = (i + 0.5) * colW;
+      const y = seam[i];
+      if (i === 0) trailCtx.moveTo(x, y);
+      else trailCtx.lineTo(x, y);
+    }
+    trailCtx.stroke();
+  }
+  trailCtx.globalAlpha = 1;
+}
 
 function rebuildPerCol(cols) {
   if (phaseAccums.length !== cols) {
@@ -416,6 +526,7 @@ function rebuildPerCol(cols) {
   silSprings = new Array(cols).fill(0).map(() => makeSpring(state.springStiff, state.springDamp, 0.5));
   prevDivs = new Array(cols).fill(0.5);
   snapPulses = new Array(cols).fill(0);
+  covSmooth = new Array(cols).fill(0);
   buildSnapBars(cols);
 }
 
@@ -443,6 +554,7 @@ function tick(now) {
   requestAnimationFrame(tick);
   const dt = lastFrame ? (now - lastFrame) / 1000 : 0;
   lastFrame = now;
+  nowSeconds = now / 1000;
 
   if (state.cameraEnabled && cameraState.ready) {
     processFrame(state.text.length || 1, state.mirrorCamera);
@@ -457,10 +569,15 @@ function tick(now) {
     motionSpring.step(dt, camActive ? cameraState.motion : 0);
 
     if (camActive) {
+      const haveCols = cameraState.colTop.length === cols;
       for (let i = 0; i < cols; i++) {
         const raw = cameraState.silhouetteDivs[i];
         if (raw >= 0) silSprings[i].step(dt, raw);
+        const cov = haveCols ? cameraState.colCoverage[i] || 0 : 0;
+        covSmooth[i] = (covSmooth[i] || 0) * 0.8 + cov * 0.2;
       }
+    } else {
+      for (let i = 0; i < cols; i++) covSmooth[i] = (covSmooth[i] || 0) * 0.9;
     }
 
     if (state.playing) {
@@ -530,6 +647,10 @@ function applyFontVariation() {
 }
 
 function rebuild() {
+  if (trailHistory.length && trailCtx) {
+    trailHistory = [];
+    trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
+  }
   if (state.mode === 'bsp') buildBSP();
   else buildNike();
 }
@@ -607,6 +728,7 @@ function buildGUI() {
     }
   });
   cam.add(state, 'mirrorCamera').name('mirror');
+  cam.add(state, 'interaction', INTERACTION_NAMES).name('interaction');
   cam.add(state, 'silhouetteBlend', 0, 1, 0.01).name('silhouette blend');
   cam.add(state, 'motionInfluence', 0, 1, 0.01).name('motion influence');
   cam.add(state, 'showPreview').name('show preview').onChange((v) => {
@@ -658,9 +780,23 @@ previewEl.appendChild(previewCanvas);
 document.body.appendChild(previewEl);
 setPreviewCanvas(previewCanvas);
 
+trailCanvas = document.createElement('canvas');
+trailCanvas.id = 'trail-canvas';
+trailCanvas.width = Math.round(stage.clientWidth) || 1280;
+trailCanvas.height = Math.round(stage.clientHeight) || 720;
+trailCtx = trailCanvas.getContext('2d');
+stage.appendChild(trailCanvas);
+
 snapOverlay = document.createElement('div');
 snapOverlay.id = 'snap-overlay';
 stage.appendChild(snapOverlay);
+
+silhouetteContour = document.createElementNS(SVG_NS, 'svg');
+silhouetteContour.id = 'silhouette-contour';
+silhouetteContour.setAttribute('preserveAspectRatio', 'none');
+silhouetteContourPath = document.createElementNS(SVG_NS, 'path');
+silhouetteContour.appendChild(silhouetteContourPath);
+stage.appendChild(silhouetteContour);
 
 setupMeasure();
 buildGUI();
