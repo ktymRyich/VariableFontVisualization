@@ -113,6 +113,17 @@ body {
   filter: drop-shadow(0 0 8px color-mix(in oklab, var(--accent), transparent 30%));
 }
 
+.mode-monolith,
+.ticker-row,
+.matrix-col {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.monolith-text {
+  fill: color-mix(in oklab, var(--fg), var(--accent) calc(var(--accent-mix, 0) * 35%));
+}
+
 .snap-bar {
   position: absolute;
   top: 0;
