@@ -21,7 +21,13 @@ export const cameraState = {
   ready: false,
   presence: 0,
   motion: 0,
-  silhouetteDivs: [],
+  silhouetteDivs: [], // per-column normalized top Y (-1 if no body) -- legacy name
+  colTop: [], // alias of silhouetteDivs
+  colBottom: [], // per-column normalized bottom Y (-1 if none)
+  colCoverage: [], // per-column body fraction 0..1
+  colMotion: [], // per-column frame-diff fraction 0..1
+  centroidX: -1, // normalized body centroid (screen space, mirror-aware)
+  centroidY: -1,
 };
 
 async function tryCreate(fileset, modelPath) {
@@ -87,6 +93,12 @@ export function stopCamera() {
   cameraState.presence = 0;
   cameraState.motion = 0;
   cameraState.silhouetteDivs = [];
+  cameraState.colTop = [];
+  cameraState.colBottom = [];
+  cameraState.colCoverage = [];
+  cameraState.colMotion = [];
+  cameraState.centroidX = -1;
+  cameraState.centroidY = -1;
   prevMaskData = null;
   lastMaskData = null;
   if (previewCtx) previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
@@ -125,47 +137,83 @@ export function processFrame(cols, mirror) {
   const w = mask.width;
   const h = mask.height;
 
+  const hasPrev = prevMaskData && prevMaskData.length === data.length;
+
   let fgCount = 0;
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] !== 0) fgCount++;
+  let sumX = 0;
+  let sumY = 0;
+  let diffTotal = 0;
+  for (let y = 0; y < h; y++) {
+    const rowOff = y * w;
+    for (let x = 0; x < w; x++) {
+      const idx = rowOff + x;
+      const fg = data[idx] !== 0;
+      if (fg) {
+        fgCount++;
+        sumX += x;
+        sumY += y;
+      }
+      if (hasPrev && fg !== (prevMaskData[idx] !== 0)) diffTotal++;
+    }
   }
+
   const presenceRaw = Math.min(1, fgCount / data.length / 0.04);
   cameraState.presence = cameraState.presence * 0.85 + presenceRaw * 0.15;
 
-  let motionRaw = 0;
-  if (prevMaskData && prevMaskData.length === data.length) {
-    let diff = 0;
-    for (let i = 0; i < data.length; i++) {
-      if ((data[i] !== 0) !== (prevMaskData[i] !== 0)) diff++;
-    }
-    motionRaw = Math.min(1, diff / data.length / 0.04);
-  }
-  prevMaskData = new Uint8Array(data);
+  const motionRaw = hasPrev ? Math.min(1, diffTotal / data.length / 0.04) : 0;
   cameraState.motion = cameraState.motion * 0.8 + motionRaw * 0.2;
+
+  if (fgCount > 0) {
+    let cx = sumX / fgCount / w;
+    const cy = sumY / fgCount / h;
+    cameraState.centroidX = mirror ? 1 - cx : cx;
+    cameraState.centroidY = cy;
+  } else {
+    cameraState.centroidX = -1;
+    cameraState.centroidY = -1;
+  }
 
   if (cameraState.silhouetteDivs.length !== cols) {
     cameraState.silhouetteDivs = new Array(cols).fill(-1);
+    cameraState.colTop = cameraState.silhouetteDivs;
+    cameraState.colBottom = new Array(cols).fill(-1);
+    cameraState.colCoverage = new Array(cols).fill(0);
+    cameraState.colMotion = new Array(cols).fill(0);
   }
   for (let i = 0; i < cols; i++) {
     const srcIdx = mirror ? cols - 1 - i : i;
     const x0 = Math.floor((srcIdx / cols) * w);
     const x1 = Math.max(x0 + 1, Math.floor(((srcIdx + 1) / cols) * w));
+    const sliceW = x1 - x0;
     let topY = -1;
-    scan: for (let y = 0; y < h; y++) {
+    let bottomY = -1;
+    let colFg = 0;
+    let colDiff = 0;
+    for (let y = 0; y < h; y++) {
       const rowOff = y * w;
       let hits = 0;
       for (let x = x0; x < x1; x++) {
-        if (data[rowOff + x] !== 0) {
+        const idx = rowOff + x;
+        const fg = data[idx] !== 0;
+        if (fg) {
           hits++;
-          if (hits >= 2) {
-            topY = y;
-            break scan;
-          }
+          colFg++;
         }
+        if (hasPrev && fg !== (prevMaskData[idx] !== 0)) colDiff++;
+      }
+      if (hits >= 2) {
+        if (topY < 0) topY = y;
+        bottomY = y;
       }
     }
     cameraState.silhouetteDivs[i] = topY < 0 ? -1 : topY / h;
+    cameraState.colBottom[i] = bottomY < 0 ? -1 : bottomY / h;
+    cameraState.colCoverage[i] = colFg / (sliceW * h);
+    cameraState.colMotion[i] = hasPrev ? Math.min(1, colDiff / (sliceW * h) / 0.08) : 0;
   }
+  cameraState.colTop = cameraState.silhouetteDivs;
+
+  prevMaskData = new Uint8Array(data);
 
   lastMaskData = data;
   lastMaskW = w;
